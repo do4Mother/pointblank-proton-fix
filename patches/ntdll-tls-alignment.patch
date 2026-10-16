@@ -1,0 +1,79 @@
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index 33bca62..da920e2 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -1375,17 +1375,27 @@ static BOOL is_dll_native_subsystem( LDR_DATA_TABLE_ENTRY *mod, const IMAGE_NT_H
+  *
+  * Allocate memory for TLS vector or index with an extra data.
+  */
+-static void *alloc_tls_memory( BOOL vector, ULONG_PTR size )
++static void *alloc_tls_memory( BOOL vector, ULONG_PTR size, ULONG_PTR align )
+ {
+-    ULONG_PTR *ptr;
++    ULONG_PTR *ptr, base;
+ 
+-    if (!(ptr = RtlAllocateHeap( GetProcessHeap(), vector ? HEAP_ZERO_MEMORY : 0, size + sizeof(void *) * 2 ))) return NULL;
+-    ptr += 2;
++    if (align < sizeof(void *)) align = sizeof(void *);
++    if (!(base = (ULONG_PTR)RtlAllocateHeap( GetProcessHeap(), vector ? HEAP_ZERO_MEMORY : 0,
++                                             size + sizeof(void *) * 3 + align - 1 ))) return NULL;
++    ptr = (ULONG_PTR *)((base + sizeof(void *) * 3 + align - 1) & ~(align - 1));
++    ptr[-3] = base;
+     if (vector) ptr[-2] = size / sizeof(void *);
+     else        ptr[-2] = ptr[-1] = 0;
+     return ptr;
+ }
+ 
++/* alignment requested through IMAGE_SCN_ALIGN_* bits of the TLS directory Characteristics */
++static ULONG_PTR get_tls_alignment( const IMAGE_TLS_DIRECTORY *dir )
++{
++    ULONG shift = (dir->Characteristics >> 20) & 0xf;
++    return shift ? (ULONG_PTR)1 << (shift - 1) : 0;
++}
++
+ 
+ /*************************************************************************
+  *		free_tls_memory
+@@ -1395,7 +1405,7 @@ static void *alloc_tls_memory( BOOL vector, ULONG_PTR size )
+ static void free_tls_memory( void *ptr )
+ {
+     if (!ptr) return;
+-    RtlFreeHeap( GetProcessHeap(), 0, (void **)ptr - 2 );
++    RtlFreeHeap( GetProcessHeap(), 0, ((void **)ptr)[-3] );
+ }
+ 
+ 
+@@ -1465,13 +1475,13 @@ static BOOL alloc_tls_slot( LDR_DATA_TABLE_ENTRY *mod )
+ 
+         t->ThreadData[j].Flags = 0;
+ 
+-        if (!(new_ptr = alloc_tls_memory( FALSE, size + dir->SizeOfZeroFill ))) return FALSE;
++        if (!(new_ptr = alloc_tls_memory( FALSE, size + dir->SizeOfZeroFill, get_tls_alignment( dir ) ))) return FALSE;
+         memcpy( new_ptr, (void *)dir->StartAddressOfRawData, size );
+         memset( (char *)new_ptr + size, 0, dir->SizeOfZeroFill );
+ 
+         if (t->OperationType == ProcessTlsReplaceVector)
+         {
+-            vector = alloc_tls_memory( TRUE, tls_module_count * sizeof(*vector) );
++            vector = alloc_tls_memory( TRUE, tls_module_count * sizeof(*vector), 0 );
+             if (!vector) return FALSE;
+             t->ThreadData[j].TlsVector = vector;
+             vector[i] = new_ptr;
+@@ -1704,7 +1714,7 @@ static NTSTATUS alloc_thread_tls(void)
+     void **pointers;
+     UINT i, size;
+ 
+-    if (!(pointers = alloc_tls_memory( TRUE, tls_module_count * sizeof(*pointers) )))
++    if (!(pointers = alloc_tls_memory( TRUE, tls_module_count * sizeof(*pointers), 0 )))
+         return STATUS_NO_MEMORY;
+ 
+     for (i = 0; i < tls_module_count; i++)
+@@ -1715,7 +1725,7 @@ static NTSTATUS alloc_thread_tls(void)
+         size = dir->EndAddressOfRawData - dir->StartAddressOfRawData;
+         if (!size && !dir->SizeOfZeroFill) continue;
+ 
+-        if (!(pointers[i] = alloc_tls_memory( FALSE, size + dir->SizeOfZeroFill )))
++        if (!(pointers[i] = alloc_tls_memory( FALSE, size + dir->SizeOfZeroFill, get_tls_alignment( dir ) )))
+         {
+             while (i) free_tls_memory( pointers[--i] );
+             free_tls_memory( pointers );
